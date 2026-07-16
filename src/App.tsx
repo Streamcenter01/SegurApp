@@ -24,7 +24,11 @@ import {
   BellRing,
   Sun,
   Moon,
-  LogOut
+  LogOut,
+  Sparkles,
+  Send,
+  X,
+  MessageSquare
 } from "lucide-react";
 import { 
   isFirebaseConfigured, 
@@ -44,10 +48,22 @@ import {
   doc, 
   setDoc, 
   getDoc, 
-  serverTimestamp 
+  serverTimestamp,
+  collection,
+  query,
+  orderBy,
+  limit,
+  onSnapshot,
+  updateDoc
 } from "firebase/firestore";
 import { UserProfile, Recorrido, ContactoConfianza, ViajeProgramado } from "./types";
-import RadarMap from "./components/RadarMap";
+import { 
+  initFcmAndGetToken, 
+  setupForegroundFcmListener, 
+  requestNotificationPermission, 
+  showLocalNotification 
+} from "./firebaseMessaging";
+import GoogleMapsRadar from "./components/GoogleMapsRadar";
 
 const WHATSAPP_DESTINO = "573189882787";
 
@@ -162,6 +178,267 @@ export default function App() {
     }
   }, [isDarkMode]);
 
+  // Passenger ride state change listener (Driver acceptance or Arrival)
+  const [lastNotifiedRideId, setLastNotifiedRideId] = useState<string | null>(null);
+  const [lastNotifiedArrivalId, setLastNotifiedArrivalId] = useState<string | null>(null);
+
+  // Passenger rating features
+  const [recorridoCalificar, setRecorridoCalificar] = useState<Recorrido | null>(null);
+  const [calificacionEstrellas, setCalificacionEstrellas] = useState<number>(5);
+  const [comentarioRating, setComentarioRating] = useState<string>("");
+  const [enviandoCalificacion, setEnviandoCalificacion] = useState<boolean>(false);
+  const previousActiveRideIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!usuario || usuario.role !== 'usuario') {
+      previousActiveRideIdRef.current = null;
+      return;
+    }
+
+    const currentActiveRide = recorridosActivos.find(
+      r => r.telefono === usuario.telefono && 
+      r.status !== 'completed' && 
+      r.status !== 'cancelled'
+    );
+
+    if (currentActiveRide) {
+      previousActiveRideIdRef.current = currentActiveRide.id;
+    } else if (previousActiveRideIdRef.current) {
+      // The active ride is no longer active. Let's check if it was completed!
+      const lastActiveId = previousActiveRideIdRef.current;
+      const finishedRide = recorridosActivos.find(r => r.id === lastActiveId);
+      if (finishedRide && finishedRide.status === 'completed') {
+        // If it was completed, and we have a driver assigned, and it wasn't rated yet, prompt for rating!
+        if (finishedRide.conductorNombre && !finishedRide.calificacionPasajero) {
+          setRecorridoCalificar(finishedRide);
+          setCalificacionEstrellas(5);
+          setComentarioRating("");
+        }
+      }
+      previousActiveRideIdRef.current = null;
+    }
+  }, [recorridosActivos, usuario]);
+
+  const guardarCalificacionConductor = async () => {
+    if (!recorridoCalificar) return;
+    setEnviandoCalificacion(true);
+
+    try {
+      // 1. Update local state & localStorage
+      const nuevas = recorridosActivos.map(r => {
+        if (r.id === recorridoCalificar.id) {
+          return {
+            ...r,
+            calificacionPasajero: calificacionEstrellas,
+            comentarioPasajero: comentarioRating,
+            calificadoAt: new Date().toISOString()
+          };
+        }
+        return r;
+      });
+      setRecorridosActivos(nuevas);
+      localStorage.setItem("segurapp_active_rides", JSON.stringify(nuevas));
+
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: "segurapp_active_rides",
+        newValue: JSON.stringify(nuevas)
+      }));
+
+      // 2. Update Firestore if connected
+      if (isFirebaseConfigured && db) {
+        const rideRef = doc(db, "recorridos", recorridoCalificar.id);
+        await updateDoc(rideRef, {
+          calificacionPasajero: calificacionEstrellas,
+          comentarioPasajero: comentarioRating,
+          calificadoAt: new Date().toISOString()
+        });
+
+        // Optional: Update the driver's profile in the 'users' collection with calculated average
+        const driverId = recorridoCalificar.conductorId;
+        if (driverId && !driverId.startsWith("sim-")) {
+          const driverRides = nuevas.filter(r => r.conductorId === driverId && r.status === 'completed');
+          const ratedRides = driverRides.filter(r => r.calificacionPasajero !== undefined);
+          
+          let totalEstrellas = calificacionEstrellas;
+          let count = 1;
+          
+          ratedRides.forEach(r => {
+            if (r.id !== recorridoCalificar.id && r.calificacionPasajero) {
+              totalEstrellas += r.calificacionPasajero;
+              count++;
+            }
+          });
+          
+          const average = (totalEstrellas / count).toFixed(1);
+          const ratingString = `${average} ★`;
+
+          const userRef = doc(db, "users", driverId);
+          await updateDoc(userRef, {
+            calificacion: ratingString
+          }).catch(err => {
+            console.warn("Could not update driver's user profile directly (they might be logged in under a phone number or different doc ID):", err);
+          });
+        }
+      }
+
+      mostrarAlertaCustom(
+        `⭐ ¡Gracias por calificar a tu conductor! Calificación de ${calificacionEstrellas} estrellas registrada con éxito.`,
+        null,
+        "CALIFICACIÓN REGISTRADA"
+      );
+      
+      setRecorridoCalificar(null);
+      setCalificacionEstrellas(5);
+      setComentarioRating("");
+    } catch (error) {
+      console.error("Error saving rating:", error);
+      mostrarAlertaCustom("⚠️ Falla al guardar la calificación. Intenta de nuevo.", null, "ERROR DE ALMACENAMIENTO");
+    } finally {
+      setEnviandoCalificacion(false);
+    }
+  };
+
+  // Gemini AI Assistant States
+  const [showAiAssistant, setShowAiAssistant] = useState(false);
+  const [aiMessages, setAiMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>(() => {
+    const saved = localStorage.getItem("segurapp_ai_messages");
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.warn("Could not load AI messages:", e);
+      }
+    }
+    return [
+      { role: 'assistant', content: '¡Hola! Soy SegurApp AI, tu Asistente de Seguridad Inteligente para Neiva. 🛡️✨\n\n¿Tienes preguntas sobre una ruta segura, consejos de prevención, o cómo usar la app? Cuéntame y te daré los mejores consejos para un viaje seguro.' }
+    ];
+  });
+  const [aiInput, setAiInput] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Save AI Chat history to localStorage
+  useEffect(() => {
+    localStorage.setItem("segurapp_ai_messages", JSON.stringify(aiMessages));
+  }, [aiMessages]);
+
+  // Scroll to bottom when AI messages change
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [aiMessages, showAiAssistant]);
+
+  // Call Gemini API Route on the Express server
+  const enviarMensajeAI = async (messageText?: string) => {
+    const textToSend = messageText || aiInput;
+    if (!textToSend.trim() || aiLoading) return;
+
+    const newMessages = [...aiMessages, { role: 'user' as const, content: textToSend }];
+    setAiMessages(newMessages);
+    if (!messageText) {
+      setAiInput("");
+    }
+    setAiLoading(true);
+
+    try {
+      const response = await fetch("/api/gemini/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: newMessages }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Error en respuesta del servidor de IA");
+      }
+
+      const data = await response.json();
+      setAiMessages([...newMessages, { role: 'assistant' as const, content: data.text || "Lo siento, no pude procesar la consulta." }]);
+    } catch (error) {
+      console.error("Error calling server Gemini API:", error);
+      setAiMessages([
+        ...newMessages,
+        {
+          role: 'assistant' as const,
+          content: "⚠️ Lo siento, experimenté una dificultad técnica al conectarme con mi núcleo AI en Neiva. Por favor verifica tu conexión e intenta de nuevo."
+        }
+      ]);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const limpiarChatAI = () => {
+    setAiMessages([
+      { role: 'assistant', content: '¡Hola de nuevo! Soy SegurApp AI. 🛡️✨ ¿En qué puedo ayudarte para que tu recorrido por Neiva sea lo más seguro posible?' }
+    ]);
+  };
+
+  useEffect(() => {
+    if (!usuario || usuario.role === 'conductor') return;
+    
+    const myRide = recorridosActivos.find(
+      r => r.telefono === usuario.telefono && 
+      r.status !== 'completed' && 
+      r.status !== 'cancelled'
+    );
+
+    if (myRide) {
+      // 1. Driver accepted the ride
+      if (myRide.status === 'accepted') {
+        if (myRide.conductorNombre && (!conductorRecogida.nombre || conductorRecogida.nombre !== myRide.conductorNombre)) {
+          setConductorRecogida({
+            nombre: myRide.conductorNombre,
+            calificacion: "4.9 ★",
+            telefono: myRide.conductorTelefono || "",
+            foto: myRide.conductorFoto || DEFAULT_AVATAR,
+            moto: myRide.conductorMoto || "Moto de Seguridad",
+            placa: myRide.conductorPlaca || "SN-123",
+            tiempoEstimado: myRide.conductorTiempoEstimado || "3 a 5 minutos",
+            pinSeguridad: myRide.conductorPinSeguridad || "0000"
+          });
+        }
+
+        // Pop up the assignment dialog if not open yet and we haven't notified for this ride assignment
+        if (!showRecogidaDialog && lastNotifiedRideId !== myRide.id) {
+          setShowRecogidaDialog(true);
+          setLastNotifiedRideId(myRide.id);
+        }
+      }
+
+      // 2. Driver arrived ("conductorAfuera" is true)
+      if (myRide.conductorAfuera && lastNotifiedArrivalId !== myRide.id) {
+        setLastNotifiedArrivalId(myRide.id);
+        
+        // Highlight arrival with a high-visibility popup alert
+        mostrarAlertaCustom(
+          `🚨 ¡TU PILOTO YA ESTÁ AFUERA!\n\n${myRide.conductorNombre || 'Tu piloto asignado'} ha llegado al punto de recogida en la moto ${myRide.conductorMoto || ''} de placa [${myRide.conductorPlaca || ''}].\n\n🛡️ PIN de Confirmación Obligatorio: [${myRide.conductorPinSeguridad || ''}]\n\nPor favor, sal con precaución, verifica los datos del piloto antes de subirte y compártele el PIN de seguridad para iniciar el viaje.`,
+          () => {
+            // Re-open dialogue so they can easily confirm boarding or call
+            setShowRecogidaDialog(true);
+          },
+          "🚨 PILOTO EN EL ORIGEN"
+        );
+
+        // Try native browser notification too if allowed
+        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+          try {
+            new Notification("🚨 SegurApp: ¡Tu piloto está afuera!", {
+              body: `${myRide.conductorNombre || 'Tu piloto'} te espera afuera. Placa: ${myRide.conductorPlaca}. PIN: ${myRide.conductorPinSeguridad}`,
+              icon: myRide.conductorFoto || "https://images.unsplash.com/photo-1622180203374-9524a54b734d?auto=format&fit=crop&q=80&w=128"
+            });
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      }
+    } else {
+      // No active ride, reset notification flags if ride is cleared
+      setLastNotifiedRideId(null);
+      setLastNotifiedArrivalId(null);
+    }
+  }, [recorridosActivos, usuario, showRecogidaDialog, lastNotifiedRideId, lastNotifiedArrivalId]);
+
   // Listen for Firebase Auth state changes if Firebase is configured
   useEffect(() => {
     if (isFirebaseConfigured && auth) {
@@ -211,13 +488,122 @@ export default function App() {
               }
             }
           } catch (error) {
-            handleFirestoreError(error, OperationType.GET, docPath);
+            const isOffline = String(error).toLowerCase().includes("offline") || String(error).toLowerCase().includes("network") || String(error).toLowerCase().includes("failed-precondition");
+            if (isOffline) {
+              console.warn("Firestore client is offline or loading from cache. Fallback to localStorage...");
+              const savedUser = localStorage.getItem("segurapp_usuario");
+              if (savedUser) {
+                try {
+                  const parsed = JSON.parse(savedUser) as UserProfile;
+                  setUsuario(parsed);
+                  setRegistroNombre(parsed.nombre);
+                  setRegistroTelefono(parsed.telefono);
+                  setRegistroFoto(parsed.foto);
+                  setRegistroRole(parsed.role || 'usuario');
+                  if (parsed.role === 'conductor') {
+                    setRegistroMoto(parsed.moto || "");
+                    setRegistroPlaca(parsed.placa || "");
+                    setRegistroPinSeguridad(parsed.pinSeguridad || "");
+                    setRegistroTiempoEstimado(parsed.tiempoEstimado || "3 a 5 minutos");
+                    setRegistroCalificacion(parsed.calificacion || "5.0 ★");
+                  }
+                  setPantalla('home');
+                } catch (e) {
+                  console.error("Error setting fallback user data:", e);
+                }
+              }
+            } else {
+              handleFirestoreError(error, OperationType.GET, docPath);
+            }
           }
         }
       });
       return () => unsubscribe();
     }
   }, []);
+
+  // Initialize FCM Token and Foreground Listener once authenticated
+  useEffect(() => {
+    if (isFirebaseConfigured && auth && firebaseUser) {
+      // Get FCM token
+      initFcmAndGetToken(firebaseUser.uid).catch((err) => {
+        console.warn("FCM token request skipped or unsupported:", err);
+      });
+
+      // Listen for foreground FCM notifications
+      let unsubscribeFore: (() => void) | null = null;
+      setupForegroundFcmListener((payload) => {
+        if (payload && payload.notification) {
+          mostrarAlertaCustom(
+            payload.notification.body || "Actualización de tu viaje",
+            null,
+            payload.notification.title || "NOTIFICACIÓN"
+          );
+        }
+      }).then((unsub) => {
+        if (unsub) unsubscribeFore = unsub;
+      }).catch(console.error);
+
+      return () => {
+        if (unsubscribeFore) unsubscribeFore();
+      };
+    }
+  }, [firebaseUser]);
+
+  // Real-time Firestore synchronizer for Recorridos
+  useEffect(() => {
+    if (isFirebaseConfigured && db && firebaseUser) {
+      const q = query(
+        collection(db, "recorridos"),
+        orderBy("createdAt", "desc"),
+        limit(50)
+      );
+
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const ridesList: Recorrido[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          ridesList.push({
+            id: docSnap.id,
+            usuarioId: data.usuarioId || "",
+            nombre: data.nombre || "",
+            telefono: data.telefono || "",
+            dePartida: data.dePartida || "",
+            coordenadasGoogleMaps: data.coordenadasGoogleMaps || "",
+            notas: data.notas || "",
+            status: data.status || "pending",
+            createdAt: data.createdAt ? (data.createdAt.toDate ? data.createdAt.toDate().toISOString() : data.createdAt) : new Date().toISOString(),
+            conductorId: data.conductorId,
+            conductorNombre: data.conductorNombre,
+            conductorTelefono: data.conductorTelefono,
+            conductorFoto: data.conductorFoto,
+            conductorMoto: data.conductorMoto,
+            conductorPlaca: data.conductorPlaca,
+            conductorPinSeguridad: data.conductorPinSeguridad,
+            conductorTiempoEstimado: data.conductorTiempoEstimado,
+            conductorAfuera: data.conductorAfuera,
+            driverLatOffset: data.driverLatOffset,
+            driverLonOffset: data.driverLonOffset,
+            passengerLat: data.passengerLat,
+            passengerLon: data.passengerLon,
+          });
+        });
+
+        setRecorridosActivos(ridesList);
+        localStorage.setItem("segurapp_active_rides", JSON.stringify(ridesList));
+
+        // Sync with standard storage event for open tabs on the same browser
+        window.dispatchEvent(new StorageEvent("storage", {
+          key: "segurapp_active_rides",
+          newValue: JSON.stringify(ridesList)
+        }));
+      }, (error) => {
+        console.error("Firestore real-time sync failed:", error);
+      });
+
+      return () => unsubscribe();
+    }
+  }, [firebaseUser]);
 
   // Load user from localStorage on mount as backup or for LocalStorage mode and sync active rides across tabs
   useEffect(() => {
@@ -963,8 +1349,15 @@ export default function App() {
           calificacion: registroRole === 'conductor' ? registroCalificacion : null,
           createdAt: serverTimestamp()
         });
+        // Request and save FCM token
+        initFcmAndGetToken(currentUid).catch(console.error);
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, docPath);
+        const isOffline = String(error).toLowerCase().includes("offline") || String(error).toLowerCase().includes("network") || String(error).toLowerCase().includes("failed-precondition");
+        if (isOffline) {
+          console.warn("Firestore is offline. User profile was saved locally.");
+        } else {
+          handleFirestoreError(error, OperationType.WRITE, docPath);
+        }
       }
     }
 
@@ -1032,10 +1425,17 @@ export default function App() {
           coordenadasGoogleMaps: coordenadasGoogleMaps,
           notas: notas,
           status: 'pending',
+          passengerLat: nuevoRecorrido.passengerLat,
+          passengerLon: nuevoRecorrido.passengerLon,
           createdAt: serverTimestamp()
         });
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, docPath);
+        const isOffline = String(error).toLowerCase().includes("offline") || String(error).toLowerCase().includes("network") || String(error).toLowerCase().includes("failed-precondition");
+        if (isOffline) {
+          console.warn("Firestore is offline. Ride request was saved locally.");
+        } else {
+          handleFirestoreError(error, OperationType.WRITE, docPath);
+        }
       }
     }
 
@@ -1094,6 +1494,23 @@ export default function App() {
                 const nuevas = parsed.map(r => r.id === randomId ? updatedTarget : r);
                 setRecorridosActivos(nuevas);
                 localStorage.setItem("segurapp_active_rides", JSON.stringify(nuevas));
+
+                // Sync simulated driver accept with Firestore if configured
+                if (isFirebaseConfigured && db) {
+                  updateDoc(doc(db, "recorridos", randomId), {
+                    status: 'accepted',
+                    conductorId: "sim-driver-1",
+                    conductorNombre: updatedTarget.conductorNombre,
+                    conductorTelefono: updatedTarget.conductorTelefono,
+                    conductorFoto: updatedTarget.conductorFoto,
+                    conductorMoto: updatedTarget.conductorMoto,
+                    conductorPlaca: updatedTarget.conductorPlaca,
+                    conductorPinSeguridad: updatedTarget.conductorPinSeguridad,
+                    conductorTiempoEstimado: updatedTarget.conductorTiempoEstimado,
+                    driverLatOffset: updatedTarget.driverLatOffset,
+                    driverLonOffset: updatedTarget.driverLonOffset
+                  }).catch(err => console.warn("Could not sync simulated accept to Firestore:", err));
+                }
                 
                 // Set pickup info
                 setConductorRecogida({
@@ -1154,6 +1571,23 @@ export default function App() {
           const nuevas = parsed.map(r => r.id === recorridoId ? updated : r);
           setRecorridosActivos(nuevas);
           localStorage.setItem("segurapp_active_rides", JSON.stringify(nuevas));
+
+          // Sync driver acceptance with Firestore if configured
+          if (isFirebaseConfigured && db) {
+            updateDoc(doc(db, "recorridos", recorridoId), {
+              status: 'accepted',
+              conductorId: firebaseUser?.uid || usuario.telefono,
+              conductorNombre: updated.conductorNombre,
+              conductorTelefono: updated.conductorTelefono,
+              conductorFoto: updated.conductorFoto,
+              conductorMoto: updated.conductorMoto,
+              conductorPlaca: updated.conductorPlaca,
+              conductorPinSeguridad: updated.conductorPinSeguridad,
+              conductorTiempoEstimado: updated.conductorTiempoEstimado,
+              driverLatOffset: updated.driverLatOffset,
+              driverLonOffset: updated.driverLonOffset
+            }).catch(err => handleFirestoreError(err, OperationType.WRITE, `recorridos/${recorridoId}`));
+          }
           
           // Trigger instant multi-tab notification to the passenger tab
           window.dispatchEvent(new StorageEvent("storage", {
@@ -1173,6 +1607,50 @@ export default function App() {
     }
   };
 
+  const avisarConductorAfuera = (recorridoId: string) => {
+    const saved = localStorage.getItem("segurapp_active_rides");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved) as Recorrido[];
+        const target = parsed.find(r => r.id === recorridoId);
+        if (target) {
+          const updated: Recorrido = {
+            ...target,
+            conductorAfuera: true,
+          };
+          
+          const nuevas = parsed.map(r => r.id === recorridoId ? updated : r);
+          setRecorridosActivos(nuevas);
+          localStorage.setItem("segurapp_active_rides", JSON.stringify(nuevas));
+
+          // Sync driver arrival with Firestore if configured
+          if (isFirebaseConfigured && db) {
+            updateDoc(doc(db, "recorridos", recorridoId), {
+              conductorAfuera: true
+            }).catch(err => handleFirestoreError(err, OperationType.WRITE, `recorridos/${recorridoId}`));
+          }
+          
+          window.dispatchEvent(new StorageEvent("storage", {
+            key: "segurapp_active_rides",
+            newValue: JSON.stringify(nuevas)
+          }));
+          
+          mostrarAlertaCustom(
+            "📢 Se ha notificado en tiempo real al pasajero que ya estás esperando afuera. ¡Excelente servicio, piloto!",
+            () => {
+              // Open a ready-to-send WhatsApp notification template as backup
+              const msj = `🏍️ *SEGURAPP: ¡YA ESTOY AFUERA!*\nHola *${target.nombre}*, te confirmo que ya me encuentro afuera esperándote.\n\n• *Piloto:* ${updated.conductorNombre || 'Verificado'}\n• *Vehículo:* ${updated.conductorMoto}\n• *Placa:* ${updated.conductorPlaca}\n• *PIN de seguridad:* ${updated.conductorPinSeguridad}\n\nPor favor, verifica estos datos por seguridad antes de abordar. ¡Te espero!`;
+              window.open(`https://wa.me/${target.telefono}?text=${encodeURIComponent(msj)}`, '_blank');
+            },
+            "NOTIFICACIÓN AFUERA"
+          );
+        }
+      } catch (err) {
+        console.error("Error setting conductor afuera", err);
+      }
+    }
+  };
+
   const registrarRecogida = (recorridoId: string) => {
     const saved = localStorage.getItem("segurapp_active_rides");
     if (saved) {
@@ -1188,6 +1666,13 @@ export default function App() {
           const nuevas = parsed.map(r => r.id === recorridoId ? updated : r);
           setRecorridosActivos(nuevas);
           localStorage.setItem("segurapp_active_rides", JSON.stringify(nuevas));
+
+          // Sync boarding status with Firestore if configured
+          if (isFirebaseConfigured && db) {
+            updateDoc(doc(db, "recorridos", recorridoId), {
+              status: 'picked_up'
+            }).catch(err => handleFirestoreError(err, OperationType.WRITE, `recorridos/${recorridoId}`));
+          }
           
           window.dispatchEvent(new StorageEvent("storage", {
             key: "segurapp_active_rides",
@@ -1221,6 +1706,13 @@ export default function App() {
           const nuevas = parsed.map(r => r.id === recorridoId ? updated : r);
           setRecorridosActivos(nuevas);
           localStorage.setItem("segurapp_active_rides", JSON.stringify(nuevas));
+
+          // Sync completion with Firestore if configured
+          if (isFirebaseConfigured && db) {
+            updateDoc(doc(db, "recorridos", recorridoId), {
+              status: 'completed'
+            }).catch(err => handleFirestoreError(err, OperationType.WRITE, `recorridos/${recorridoId}`));
+          }
           
           window.dispatchEvent(new StorageEvent("storage", {
             key: "segurapp_active_rides",
@@ -1819,13 +2311,18 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* RADAR MAP FOR CONDUCTOR */}
-                    <RadarMap
-                      recorridosActivos={recorridosActivos}
-                      conductorOnline={conductorOnline}
-                      aceptarRecorrido={aceptarRecorrido}
-                      mostrarAlertaCustom={mostrarAlertaCustom}
-                    />
+                    {/* GOOGLE MAPS RADAR FOR DRIVERS */}
+                    {usuario && (
+                      <GoogleMapsRadar
+                        recorridosActivos={recorridosActivos}
+                        conductoresCercanos={conductoresCercanos}
+                        usuarioActual={{
+                          nombre: usuario.nombre,
+                          telefono: usuario.telefono,
+                          foto: usuario.foto
+                        }}
+                      />
+                    )}
 
                     {/* LIVE SERVICES LIST */}
                     <div className="bg-bg-dark border border-white/10 rounded-3xl p-5 shadow-xl">
@@ -1897,13 +2394,29 @@ export default function App() {
 
                             <div className="grid grid-cols-2 gap-3">
                               {ride.status === 'accepted' ? (
-                                <button
-                                  type="button"
-                                  onClick={() => registrarRecogida(ride.id)}
-                                  className="col-span-2 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold uppercase py-3 rounded-xl transition-all cursor-pointer text-center flex items-center justify-center gap-1.5"
-                                >
-                                  ✅ Registrar Recogida (Pasajero a Bordo)
-                                </button>
+                                <div className="col-span-2 flex flex-col gap-2.5">
+                                  <button
+                                    type="button"
+                                    disabled={ride.conductorAfuera}
+                                    onClick={() => avisarConductorAfuera(ride.id)}
+                                    className={`w-full py-3 px-4 rounded-xl text-xs font-bold uppercase transition-all cursor-pointer text-center flex items-center justify-center gap-2 border ${
+                                      ride.conductorAfuera 
+                                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 cursor-not-allowed opacity-80' 
+                                        : 'bg-amber-500 hover:bg-amber-600 border-amber-600 text-white active:scale-[0.99]'
+                                    }`}
+                                  >
+                                    <span>📢</span>
+                                    {ride.conductorAfuera ? "Notificación 'Ya estoy afuera' enviada" : "Avisar: ¡Ya estoy afuera!"}
+                                  </button>
+                                  
+                                  <button
+                                    type="button"
+                                    onClick={() => registrarRecogida(ride.id)}
+                                    className="w-full bg-emerald-500 hover:bg-emerald-600 border border-emerald-600 text-white text-xs font-bold uppercase py-3 rounded-xl transition-all cursor-pointer text-center flex items-center justify-center gap-1.5 active:scale-[0.99]"
+                                  >
+                                    ✅ Registrar Recogida (Pasajero a Bordo)
+                                  </button>
+                                </div>
                               ) : (
                                 <button
                                   type="button"
@@ -1924,6 +2437,210 @@ export default function App() {
                   /*                   VISTA DE PASAJERO                      */
                   /* ======================================================== */
                   <>
+                    {/* Active Ride Tracker Card */}
+                    {(() => {
+                      const myActiveRide = recorridosActivos.find(
+                        r => r.telefono === usuario.telefono && 
+                        r.status !== 'completed' && 
+                        r.status !== 'cancelled'
+                      );
+                      if (!myActiveRide) return null;
+
+                      return (
+                        <div className="bg-bg-dark border border-brand-primary/20 rounded-3xl p-5 mt-4 shadow-xl animate-metallic relative overflow-hidden">
+                          {/* Background radial highlight */}
+                          <div className="absolute top-0 right-0 w-32 h-32 bg-brand-primary/5 rounded-full blur-2xl pointer-events-none" />
+
+                          <div className="flex justify-between items-center mb-3.5 border-b border-white/5 pb-3">
+                            <div>
+                              <span className="text-[10px] font-bold tracking-widest text-text-secondary uppercase">
+                                Estado de tu recorrido
+                              </span>
+                              <div className="flex items-center gap-1.5 mt-1">
+                                <span className={`w-2 h-2 rounded-full animate-pulse ${
+                                  myActiveRide.status === 'pending' 
+                                    ? 'bg-amber-400' 
+                                    : myActiveRide.conductorAfuera 
+                                      ? 'bg-brand-primary animate-bounce' 
+                                      : myActiveRide.status === 'accepted' 
+                                        ? 'bg-emerald-400' 
+                                        : 'bg-emerald-500'
+                                }`} />
+                                <h4 className="text-[11px] font-extrabold text-white uppercase tracking-wider">
+                                  {myActiveRide.status === 'pending' && "Buscando piloto..."}
+                                  {myActiveRide.status === 'accepted' && (myActiveRide.conductorAfuera ? "¡Tu piloto ya llegó!" : "Piloto en camino")}
+                                  {myActiveRide.status === 'picked_up' && "Recorrido en progreso"}
+                                </h4>
+                              </div>
+                            </div>
+
+                            {myActiveRide.status === 'pending' && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  // Cancel pending ride
+                                  const nuevas = recorridosActivos.map(r => r.id === myActiveRide.id ? { ...r, status: 'cancelled' as const } : r);
+                                  setRecorridosActivos(nuevas);
+                                  localStorage.setItem("segurapp_active_rides", JSON.stringify(nuevas));
+
+                                  if (isFirebaseConfigured && db) {
+                                    updateDoc(doc(db, "recorridos", myActiveRide.id), {
+                                      status: 'cancelled'
+                                    }).catch(err => handleFirestoreError(err, OperationType.WRITE, `recorridos/${myActiveRide.id}`));
+                                  }
+
+                                  window.dispatchEvent(new StorageEvent("storage", {
+                                    key: "segurapp_active_rides",
+                                    newValue: JSON.stringify(nuevas)
+                                  }));
+                                  mostrarAlertaCustom("🚫 Tu solicitud de recorrido ha sido cancelada.", null, "RECORRIDO CANCELADO");
+                                }}
+                                className="text-[10px] font-bold text-red-400 hover:text-red-300 transition-colors uppercase tracking-wider flex items-center gap-1 cursor-pointer"
+                              >
+                                Cancelar
+                              </button>
+                            )}
+                          </div>
+
+                          {myActiveRide.status === 'pending' ? (
+                            <div className="text-center py-4 bg-white/5 rounded-2xl border border-white/5">
+                              <p className="text-xs text-text-secondary px-4 leading-normal">
+                                Estamos transmitiendo tu señal de solicitud satelital en Neiva para asignarte un piloto verificado. Espera unos segundos o comparte el enlace por WhatsApp.
+                              </p>
+                              <div className="mt-3 flex justify-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    // Trigger sharing coordinates link again
+                                    const mapLink = myActiveRide.coordenadasGoogleMaps;
+                                    let mensaje = `🚨 *SOLICITUD DE VIAJE SEGURO - SEGURAPP*\n\n`;
+                                    mensaje += `👤 *Usuario:* ${myActiveRide.nombre}\n`;
+                                    mensaje += `📍 *Origen:* ${myActiveRide.dePartida}\n`;
+                                    if (mapLink) mensaje += `🛰️ *GPS:* ${mapLink}\n`;
+                                    window.open(`https://wa.me/?text=${encodeURIComponent(mensaje)}`, '_blank');
+                                  }}
+                                  className="bg-brand-primary/10 hover:bg-brand-primary/20 border border-brand-primary/20 text-brand-primary text-[10px] font-bold uppercase px-3 py-1.5 rounded-lg flex items-center gap-1 cursor-pointer"
+                                >
+                                  Compartir Alerta de Viaje
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="space-y-3.5">
+                              {/* Driver arrived special notice banner */}
+                              {myActiveRide.conductorAfuera && (
+                                <div className="bg-brand-primary/15 border border-brand-primary/30 p-3 rounded-2xl flex gap-2.5 items-start">
+                                  <span className="text-lg">🏍️</span>
+                                  <div>
+                                    <p className="text-xs font-extrabold text-brand-primary uppercase">¡Tu piloto ya está afuera!</p>
+                                    <p className="text-[11px] text-text-secondary leading-snug mt-0.5">
+                                      Verifica los datos del vehículo y compártele tu PIN de seguridad para que el viaje pueda dar inicio formalmente.
+                                    </p>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Driver Details */}
+                              <div className="bg-white/5 border border-white/5 p-3 rounded-2xl flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-full border border-white/10 overflow-hidden shrink-0 bg-neutral-800">
+                                  <img src={myActiveRide.conductorFoto || DEFAULT_AVATAR} className="w-full h-full object-cover" />
+                                </div>
+                                <div className="flex-grow min-w-0">
+                                  <h5 className="text-xs font-extrabold text-white truncate">{myActiveRide.conductorNombre}</h5>
+                                  <p className="text-[10px] text-brand-secondary font-bold flex items-center gap-1 mt-0.5">
+                                    {myActiveRide.conductorMoto} • <span className="font-mono bg-white/5 px-1 py-0.5 rounded border border-white/5 text-white">{myActiveRide.conductorPlaca}</span>
+                                  </p>
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <span className="block text-[8px] text-text-secondary uppercase font-bold tracking-wider">PIN</span>
+                                  <span className="text-xs font-mono font-extrabold text-amber-400 bg-amber-400/10 border border-amber-400/20 px-2 py-0.5 rounded">
+                                    {myActiveRide.conductorPinSeguridad || "----"}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="flex gap-2.5">
+                                <a
+                                  href={`tel:${myActiveRide.conductorTelefono}`}
+                                  className="flex-1 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-xl py-2.5 text-center text-xs font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
+                                >
+                                  📞 Llamar Piloto
+                                </a>
+
+                                {myActiveRide.status === 'accepted' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      // Passenger confirms they are onboard!
+                                      const nuevas = recorridosActivos.map(r => r.id === myActiveRide.id ? { ...r, status: 'picked_up' as const } : r);
+                                      setRecorridosActivos(nuevas);
+                                      localStorage.setItem("segurapp_active_rides", JSON.stringify(nuevas));
+
+                                      if (isFirebaseConfigured && db) {
+                                        updateDoc(doc(db, "recorridos", myActiveRide.id), {
+                                          status: 'picked_up'
+                                        }).catch(err => handleFirestoreError(err, OperationType.WRITE, `recorridos/${myActiveRide.id}`));
+                                      }
+
+                                      window.dispatchEvent(new StorageEvent("storage", {
+                                        key: "segurapp_active_rides",
+                                        newValue: JSON.stringify(nuevas)
+                                      }));
+                                      mostrarAlertaCustom(
+                                        "✅ ¡Viaje Iniciado! Tu piloto ha registrado el abordaje de forma segura. Disfruta tu recorrido protegido por SegurApp.",
+                                        null,
+                                        "VIAJE EN CURSO"
+                                      );
+                                    }}
+                                    className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl py-2.5 text-center text-xs font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 active:scale-95 shadow-lg shadow-emerald-500/10"
+                                  >
+                                    👍 Abordar
+                                  </button>
+                                )}
+
+                                {myActiveRide.status === 'picked_up' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      // Passenger completes ride
+                                      const nuevas = recorridosActivos.map(r => r.id === myActiveRide.id ? { ...r, status: 'completed' as const } : r);
+                                      setRecorridosActivos(nuevas);
+                                      localStorage.setItem("segurapp_active_rides", JSON.stringify(nuevas));
+
+                                      if (isFirebaseConfigured && db) {
+                                        updateDoc(doc(db, "recorridos", myActiveRide.id), {
+                                          status: 'completed'
+                                        }).catch(err => handleFirestoreError(err, OperationType.WRITE, `recorridos/${myActiveRide.id}`));
+                                      }
+
+                                      window.dispatchEvent(new StorageEvent("storage", {
+                                        key: "segurapp_active_rides",
+                                        newValue: JSON.stringify(nuevas)
+                                      }));
+                                      mostrarAlertaCustom(
+                                        "🏁 ¡Has llegado seguro a tu destino! Gracias por utilizar SegurApp para tu movilidad en Neiva.",
+                                        () => {
+                                          if (myActiveRide.conductorNombre) {
+                                            setRecorridoCalificar(myActiveRide);
+                                            setCalificacionEstrellas(5);
+                                            setComentarioRating("");
+                                          }
+                                        },
+                                        "LLEGADA EXITOSA"
+                                      );
+                                    }}
+                                    className="flex-1 bg-brand-primary hover:bg-red-600 text-white rounded-xl py-2.5 text-center text-xs font-bold uppercase transition-all cursor-pointer flex items-center justify-center gap-1 active:scale-95"
+                                  >
+                                    🏁 Finalizar
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
                     {/* Dispatch reservation settings form */}
                 <div className="bg-bg-dark/95 border border-white/10 rounded-3xl p-6 mt-4 relative overflow-hidden shadow-xl animate-metallic">
                   
@@ -2042,29 +2759,6 @@ export default function App() {
                     </button>
                   </div>
 
-                </div>
-
-                {/* 🚖 Driver Pickup Active Status Card */}
-                <div className="bg-bg-dark/95 border border-brand-primary/20 rounded-3xl p-5 mt-4 relative overflow-hidden shadow-xl animate-metallic">
-                  <div className="absolute top-0 right-0 w-20 h-20 bg-brand-primary/5 rounded-full blur-xl pointer-events-none" />
-                  <div className="flex items-center justify-between mb-3 border-b border-white/5 pb-2">
-                    <span className="flex items-center gap-1.5 text-xs font-extrabold text-white uppercase tracking-widest">
-                      <Bike className="w-4 h-4 text-brand-primary animate-pulse" /> Monitoreo de Recogida
-                    </span>
-                    <span className="text-[9px] font-bold text-amber-400 bg-amber-400/10 border border-amber-400/20 px-2 py-0.5 rounded-full uppercase animate-pulse">
-                      Piloto en Camino
-                    </span>
-                  </div>
-                  <p className="text-xs text-text-secondary leading-relaxed mb-4">
-                    ¿Ya solicitaste tu recorrido seguro? Tu conductor verificado por la central de Neiva está listo para recogerte. Consulta el cuadro de diálogo de abordaje seguro.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setShowRecogidaDialog(true)}
-                    className="w-full bg-brand-primary/10 hover:bg-brand-primary/25 border border-brand-primary/30 text-brand-primary text-xs font-bold uppercase py-3.5 rounded-xl transition-all cursor-pointer text-center flex items-center justify-center gap-2 active:scale-[0.98] font-display tracking-wider"
-                  >
-                    <Sliders className="w-3.5 h-3.5 text-brand-primary" /> Ver Confirmación de Recogida
-                  </button>
                 </div>
 
                 {/* 🛡️ Contacts Integration Section */}
@@ -2632,6 +3326,373 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {/* 🚀 SEGURAPP AI ASSISTANT OVERLAY & FLOATING ACTION BUTTON */}
+      {pantalla === 'home' && usuario && (
+        <>
+          {/* Pulsing Floating Action Button in Bottom Right */}
+          <button
+            type="button"
+            onClick={() => setShowAiAssistant(true)}
+            className="fixed bottom-6 right-6 z-[90] bg-gradient-to-tr from-brand-primary to-orange-500 hover:from-orange-500 hover:to-brand-primary text-white shadow-lg shadow-brand-primary/30 w-14 h-14 rounded-full border border-white/20 transition-all duration-300 hover:scale-110 active:scale-95 flex items-center justify-center cursor-pointer group"
+            title="Asistente de Seguridad AI"
+          >
+            <Sparkles className="w-6 h-6 animate-pulse group-hover:rotate-12 transition-transform duration-300" />
+            <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500 border border-black/20"></span>
+            </span>
+          </button>
+
+          {/* AI Assistant Chat Panel Dialog Overlay */}
+          <AnimatePresence>
+            {showAiAssistant && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 bg-black/85 backdrop-blur-sm z-[110] flex items-end sm:items-center justify-center p-0 sm:p-4"
+              >
+                {/* Backdrop Click to Close */}
+                <div 
+                  className="absolute inset-0 cursor-default" 
+                  onClick={() => setShowAiAssistant(false)} 
+                />
+
+                <motion.div
+                  initial={{ y: "100%", opacity: 0.5 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  exit={{ y: "100%", opacity: 0.5 }}
+                  transition={{ type: "spring", damping: 25, stiffness: 220 }}
+                  className="relative w-full max-w-md bg-bg-dark border border-white/10 rounded-t-3xl sm:rounded-3xl overflow-hidden flex flex-col h-[90vh] sm:h-[620px] shadow-2xl animate-metallic"
+                >
+                  {/* Decorative Header Border Accent */}
+                  <div className="absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r from-brand-primary via-orange-500 to-brand-secondary" />
+
+                  {/* Chat Header */}
+                  <div className="bg-bg-dark/95 border-b border-white/5 p-4 flex items-center justify-between shrink-0 relative">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-brand-primary/10 border border-brand-primary/20 flex items-center justify-center relative">
+                        <Sparkles className="w-5 h-5 text-brand-primary" />
+                        <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-emerald-500 rounded-full border-2 border-bg-dark" />
+                      </div>
+                      <div>
+                        <h3 className="font-display text-sm font-black text-white uppercase tracking-wider flex items-center gap-1.5">
+                          SegurApp AI
+                        </h3>
+                        <p className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Núcleo de Seguridad Activo
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {/* Clear history */}
+                      <button
+                        type="button"
+                        onClick={limpiarChatAI}
+                        className="px-2.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white text-[10px] font-bold uppercase transition-all cursor-pointer"
+                        title="Limpiar Conversación"
+                      >
+                        Reiniciar
+                      </button>
+                      
+                      {/* Close button */}
+                      <button
+                        type="button"
+                        onClick={() => setShowAiAssistant(false)}
+                        className="p-2 rounded-xl bg-white/5 hover:bg-red-500/10 hover:text-red-400 text-text-secondary transition-all cursor-pointer"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Chat Messages Body */}
+                  <div className="flex-grow overflow-y-auto p-4 space-y-4 bg-bg-dark/40 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+                    {aiMessages.map((msg, idx) => (
+                      <div
+                        key={idx}
+                        className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
+                      >
+                        <div
+                          className={`p-3.5 rounded-2xl text-[11px] leading-relaxed max-w-[85%] whitespace-pre-wrap shadow-md ${
+                            msg.role === 'user'
+                              ? 'bg-brand-primary text-white rounded-tr-none'
+                              : 'bg-white/5 border border-white/10 text-text-primary rounded-tl-none'
+                          }`}
+                        >
+                          {msg.content}
+                        </div>
+                        <span className="text-[8px] text-text-secondary font-mono mt-1 px-1">
+                          {msg.role === 'user' ? 'Tú' : 'SegurApp AI'}
+                        </span>
+                      </div>
+                    ))}
+                    {aiLoading && (
+                      <div className="flex flex-col items-start">
+                        <div className="bg-white/5 border border-white/5 p-3.5 rounded-2xl rounded-tl-none text-[11px] text-text-secondary max-w-[80%] flex items-center gap-2 shadow-sm">
+                          <div className="flex gap-1">
+                            <span className="w-1.5 h-1.5 bg-brand-primary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <span className="w-1.5 h-1.5 bg-brand-primary rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-1.5 h-1.5 bg-brand-primary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </div>
+                          <span className="font-mono text-[9px] text-brand-primary animate-pulse">Trazando rutas seguras en Neiva...</span>
+                        </div>
+                      </div>
+                    )}
+                    <div ref={chatEndRef} />
+                  </div>
+
+                  {/* Prompt Chip suggestions */}
+                  <div className="px-4 py-2 shrink-0 border-t border-white/5 bg-bg-dark/95">
+                    <p className="text-[8px] font-bold text-text-secondary uppercase tracking-widest mb-1.5">Consultas de seguridad rápidas:</p>
+                    <div className="flex gap-2 overflow-x-auto pb-1.5 -mx-1 px-1 scrollbar-none">
+                      <button
+                        type="button"
+                        onClick={() => enviarMensajeAI("¿Cuáles son las rutas y avenidas más iluminadas y recomendadas para transitar en moto en Neiva de noche?")}
+                        className="shrink-0 bg-white/5 hover:bg-white/10 hover:border-brand-primary/30 border border-white/5 text-[9px] font-bold text-white px-2.5 py-1.5 rounded-full transition-all cursor-pointer whitespace-nowrap active:scale-95"
+                      >
+                        🗺️ Rutas seguras Neiva
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => enviarMensajeAI("¿Qué recomendaciones de seguridad y prevención debo tener en cuenta al viajar como pasajero de noche?")}
+                        className="shrink-0 bg-white/5 hover:bg-white/10 hover:border-brand-primary/30 border border-white/5 text-[9px] font-bold text-white px-2.5 py-1.5 rounded-full transition-all cursor-pointer whitespace-nowrap active:scale-95"
+                      >
+                        🌙 Prevención nocturna
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => enviarMensajeAI("Dame un checklist de seguridad rápido antes de subirme a la moto de un recorrido de SegurApp.")}
+                        className="shrink-0 bg-white/5 hover:bg-white/10 hover:border-brand-primary/30 border border-white/5 text-[9px] font-bold text-white px-2.5 py-1.5 rounded-full transition-all cursor-pointer whitespace-nowrap active:scale-95"
+                      >
+                        📋 Checklist Pasajero
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => enviarMensajeAI("¿Cuáles son las normas de seguridad vial, uso de chaleco y velocidad recomendadas para conductores en Neiva?")}
+                        className="shrink-0 bg-white/5 hover:bg-white/10 hover:border-brand-primary/30 border border-white/5 text-[9px] font-bold text-white px-2.5 py-1.5 rounded-full transition-all cursor-pointer whitespace-nowrap active:scale-95"
+                      >
+                        🏍️ Tips para Conductores
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Input form footer */}
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      enviarMensajeAI();
+                    }}
+                    className="p-4 bg-bg-dark border-t border-white/5 flex gap-2 shrink-0"
+                  >
+                    <input
+                      type="text"
+                      value={aiInput}
+                      onChange={(e) => setAiInput(e.target.value)}
+                      placeholder="Pregunta a la IA sobre rutas, seguridad..."
+                      disabled={aiLoading}
+                      className="flex-grow bg-bg-input border border-white/10 focus:border-brand-primary/50 text-white rounded-xl px-4 py-2.5 text-xs outline-none transition-all placeholder:text-text-secondary animate-none"
+                    />
+                    <button
+                      type="submit"
+                      disabled={aiLoading || !aiInput.trim()}
+                      className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                        aiInput.trim() && !aiLoading
+                          ? 'bg-brand-primary hover:bg-red-600 text-white shadow-md shadow-brand-primary/10 active:scale-95'
+                          : 'bg-white/5 border border-white/5 text-text-secondary cursor-not-allowed'
+                      }`}
+                    >
+                      <Send className="w-4 h-4" />
+                    </button>
+                  </form>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* ⭐ PASAJERO RATING DIALOG OVERLAY */}
+          <AnimatePresence>
+            {recorridoCalificar && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 bg-black/80 backdrop-blur-md z-[120] flex items-center justify-center p-4"
+              >
+                {/* Backdrop Click */}
+                <div 
+                  className="absolute inset-0 cursor-default" 
+                  onClick={() => {
+                    // Prevent accidental dismissal if sending, otherwise reset
+                    if (!enviandoCalificacion) {
+                      setRecorridoCalificar(null);
+                      setCalificacionEstrellas(5);
+                      setComentarioRating("");
+                    }
+                  }} 
+                />
+
+                <motion.div
+                  initial={{ scale: 0.95, y: 20, opacity: 0 }}
+                  animate={{ scale: 1, y: 0, opacity: 1 }}
+                  exit={{ scale: 0.95, y: 20, opacity: 0 }}
+                  transition={{ type: "spring", damping: 25, stiffness: 220 }}
+                  className="relative w-full max-w-md bg-bg-dark border border-white/10 rounded-3xl overflow-hidden shadow-2xl p-6 z-10 animate-metallic"
+                >
+                  {/* Decorative Header Accent */}
+                  <div className="absolute top-0 left-0 right-0 h-[3px] bg-gradient-to-r from-amber-400 via-brand-primary to-orange-500" />
+
+                  <h3 className="font-display text-base font-black text-white uppercase tracking-wider text-center mt-2">
+                    Califica tu Piloto
+                  </h3>
+                  <p className="text-[10px] text-text-secondary font-mono text-center mt-1 uppercase tracking-widest">
+                    SegurApp Calidad de Servicio Neiva
+                  </p>
+
+                  {/* Driver Profile Card */}
+                  <div className="bg-white/5 border border-white/5 p-4 rounded-2xl flex flex-col items-center text-center mt-5">
+                    <div className="w-16 h-16 rounded-full border-2 border-brand-primary/30 overflow-hidden bg-neutral-800 shadow-lg mb-2.5">
+                      <img src={recorridoCalificar.conductorFoto || DEFAULT_AVATAR} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    </div>
+                    <h4 className="text-sm font-extrabold text-white">{recorridoCalificar.conductorNombre}</h4>
+                    <p className="text-[11px] text-brand-secondary font-bold mt-1">
+                      {recorridoCalificar.conductorMoto} • <span className="font-mono bg-white/5 px-1.5 py-0.5 rounded border border-white/5 text-white">{recorridoCalificar.conductorPlaca}</span>
+                    </p>
+                    <p className="text-[10px] text-text-secondary mt-1 max-w-xs leading-normal">
+                      Ayúdanos a mantener altos estándares de seguridad y confianza en Neiva calificando tu experiencia en este viaje.
+                    </p>
+                  </div>
+
+                  {/* Star Selector */}
+                  <div className="flex flex-col items-center mt-6">
+                    <span className="text-[10px] text-text-secondary uppercase font-bold tracking-wider mb-2">¿Cómo estuvo tu recorrido?</span>
+                    <div className="flex gap-2">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <button
+                          key={star}
+                          type="button"
+                          onClick={() => setCalificacionEstrellas(star)}
+                          className="p-1 hover:scale-125 transition-transform duration-200 cursor-pointer"
+                        >
+                          <svg
+                            className={`w-8 h-8 transition-colors duration-200 ${
+                              star <= calificacionEstrellas
+                                ? 'text-amber-400 fill-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.5)]'
+                                : 'text-neutral-600 fill-transparent'
+                            }`}
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.907c.961 0 1.36 1.246.588 1.81l-3.97 2.883a1 1 0 00-.364 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.971-2.883a1 1 0 00-1.175 0l-3.97 2.883c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.364-1.118L2.98 10.1c-.773-.565-.375-1.81.587-1.81H8.5a1 1 0 00.951-.69l1.519-4.674z"
+                            />
+                          </svg>
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-xs font-black text-amber-400 mt-2">
+                      {calificacionEstrellas === 1 && "⚠️ Muy malo"}
+                      {calificacionEstrellas === 2 && "⚡ Regular"}
+                      {calificacionEstrellas === 3 && "👍 Aceptable"}
+                      {calificacionEstrellas === 4 && "✨ Muy bueno"}
+                      {calificacionEstrellas === 5 && "🛡️ Excelente e Impecable"}
+                    </span>
+                  </div>
+
+                  {/* Highlight tags */}
+                  <div className="mt-5">
+                    <span className="text-[10px] text-text-secondary uppercase font-bold tracking-wider mb-2 block text-center">Aspectos destacados:</span>
+                    <div className="flex flex-wrap gap-2 justify-center">
+                      {[
+                        "Conducción Segura 🛡️",
+                        "Excelente Ruta 🗺️",
+                        "Uso de EPP / Casco 🏍️",
+                        "Piloto Amable 🤝",
+                        "Buena Velocidad ⚡",
+                        "Identidad Verificada ✅"
+                      ].map((tag) => {
+                        const contains = comentarioRating.includes(tag);
+                        return (
+                          <button
+                            key={tag}
+                            type="button"
+                            onClick={() => {
+                              if (contains) {
+                                setComentarioRating(
+                                  comentarioRating
+                                    .replace(tag, "")
+                                    .replace(/,\s*,/g, ",")
+                                    .trim()
+                                );
+                              } else {
+                                setComentarioRating(
+                                  comentarioRating 
+                                    ? `${comentarioRating}, ${tag}`
+                                    : tag
+                                );
+                              }
+                            }}
+                            className={`text-[9px] font-bold px-2.5 py-1.5 rounded-full border transition-all cursor-pointer active:scale-95 ${
+                              contains
+                                ? 'bg-brand-primary/20 border-brand-primary text-white shadow-sm'
+                                : 'bg-white/5 border-white/5 text-text-secondary hover:text-white'
+                            }`}
+                          >
+                            {tag}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Comment inputs */}
+                  <div className="mt-5">
+                    <textarea
+                      value={comentarioRating}
+                      onChange={(e) => setComentarioRating(e.target.value)}
+                      placeholder="Escribe comentarios adicionales (opcional)..."
+                      className="w-full bg-bg-input border border-white/10 focus:border-brand-primary/50 text-white rounded-xl p-3 text-[11px] h-20 outline-none resize-none transition-all placeholder:text-text-secondary"
+                      maxLength={200}
+                    />
+                    <div className="text-right text-[8px] text-text-secondary font-mono mt-1">
+                      {comentarioRating.length}/200 caracteres
+                    </div>
+                  </div>
+
+                  {/* Actions buttons */}
+                  <div className="flex gap-3 mt-6">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRecorridoCalificar(null);
+                        setCalificacionEstrellas(5);
+                        setComentarioRating("");
+                      }}
+                      disabled={enviandoCalificacion}
+                      className="flex-1 bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white text-xs font-bold uppercase py-3 rounded-xl transition-all cursor-pointer text-center"
+                    >
+                      Omitir
+                    </button>
+                    <button
+                      type="button"
+                      onClick={guardarCalificacionConductor}
+                      disabled={enviandoCalificacion}
+                      className="flex-1 bg-gradient-to-tr from-brand-primary to-orange-500 hover:from-orange-500 hover:to-brand-primary text-white text-xs font-bold uppercase py-3 rounded-xl transition-all cursor-pointer text-center flex items-center justify-center gap-1 shadow-lg shadow-brand-primary/20"
+                    >
+                      {enviandoCalificacion ? "Guardando..." : "Calificar"}
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </>
+      )}
     </div>
   );
 }

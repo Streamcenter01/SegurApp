@@ -23,6 +23,11 @@
           "maxLength": 500000,
           "description": "Base64 encoded avatar photo or URL"
         },
+        "fcmToken": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Firebase Cloud Messaging token for push notifications"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -71,6 +76,82 @@
           "type": "string",
           "enum": ["pending", "accepted", "completed", "cancelled"],
           "description": "Status of the ride"
+        },
+        "conductorId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "UID of the driver"
+        },
+        "conductorNombre": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Name of the driver"
+        },
+        "conductorTelefono": {
+          "type": "string",
+          "maxLength": 20,
+          "description": "Phone number of the driver"
+        },
+        "conductorFoto": {
+          "type": "string",
+          "maxLength": 600000,
+          "description": "Avatar photo of the driver"
+        },
+        "conductorMoto": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Motorcycle description"
+        },
+        "conductorPlaca": {
+          "type": "string",
+          "maxLength": 20,
+          "description": "License plate of the motorcycle"
+        },
+        "conductorPinSeguridad": {
+          "type": "string",
+          "maxLength": 10,
+          "description": "Pick up verification PIN"
+        },
+        "conductorTiempoEstimado": {
+          "type": "string",
+          "maxLength": 50,
+          "description": "Estimated arrival duration"
+        },
+        "conductorAfuera": {
+          "type": "boolean",
+          "description": "True when driver signals they have arrived"
+        },
+        "driverLatOffset": {
+          "type": "number",
+          "description": "Latitude offset for simulation"
+        },
+        "driverLonOffset": {
+          "type": "number",
+          "description": "Longitude offset for simulation"
+        },
+        "passengerLat": {
+          "type": "number",
+          "description": "Passenger latitude location"
+        },
+        "passengerLon": {
+          "type": "number",
+          "description": "Passenger longitude location"
+        },
+        "calificacionPasajero": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Passenger rating for the driver"
+        },
+        "comentarioPasajero": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Passenger optional review comments"
+        },
+        "calificadoAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the rating was submitted"
         },
         "createdAt": {
           "type": "string",

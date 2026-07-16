@@ -29,10 +29,14 @@ export interface Recorrido {
   conductorPlaca?: string;
   conductorPinSeguridad?: string;
   conductorTiempoEstimado?: string;
+  conductorAfuera?: boolean;
   driverLatOffset?: number;
   driverLonOffset?: number;
   passengerLat?: number;
   passengerLon?: number;
+  calificacionPasajero?: number;
+  comentarioPasajero?: string;
+  calificadoAt?: string;
 }
 
 export interface ContactoConfianza {

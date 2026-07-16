@@ -39,6 +39,13 @@ service cloud.firestore {
         && data.telefono.size() >= 7 
         && data.telefono.size() <= 20
         && (!('foto' in data) || (data.foto is string && data.foto.size() <= 600000))
+        && (!('fcmToken' in data) || (data.fcmToken is string && data.fcmToken.size() <= 1024))
+        && (!('role' in data) || (data.role is string && (data.role == 'usuario' || data.role == 'conductor')))
+        && (!('moto' in data) || (data.moto is string && data.moto.size() <= 100))
+        && (!('placa' in data) || (data.placa is string && data.placa.size() <= 20))
+        && (!('pinSeguridad' in data) || (data.pinSeguridad is string && data.pinSeguridad.size() <= 10))
+        && (!('tiempoEstimado' in data) || (data.tiempoEstimado is string && data.tiempoEstimado.size() <= 50))
+        && (!('calificacion' in data) || (data.calificacion is string && data.calificacion.size() <= 20))
         && (!('createdAt' in data) || data.createdAt is timestamp);
     }
 
@@ -46,7 +53,6 @@ service cloud.firestore {
     function isValidRecorrido(data) {
       return data.usuarioId is string 
         && data.usuarioId.size() <= 128
-        && data.usuarioId == request.auth.uid
         && data.nombre is string 
         && data.nombre.size() >= 1 
         && data.nombre.size() <= 100
@@ -59,7 +65,23 @@ service cloud.firestore {
         && (!('coordenadasGoogleMaps' in data) || (data.coordenadasGoogleMaps is string && data.coordenadasGoogleMaps.size() <= 250))
         && (!('notas' in data) || (data.notas is string && data.notas.size() <= 500))
         && data.status is string 
-        && (data.status == 'pending' || data.status == 'accepted' || data.status == 'completed' || data.status == 'cancelled')
+        && (data.status == 'pending' || data.status == 'accepted' || data.status == 'picked_up' || data.status == 'completed' || data.status == 'cancelled')
+        && (!('conductorId' in data) || (data.conductorId is string && data.conductorId.size() <= 128))
+        && (!('conductorNombre' in data) || (data.conductorNombre is string && data.conductorNombre.size() <= 100))
+        && (!('conductorTelefono' in data) || (data.conductorTelefono is string && data.conductorTelefono.size() <= 20))
+        && (!('conductorFoto' in data) || (data.conductorFoto is string && data.conductorFoto.size() <= 600000))
+        && (!('conductorMoto' in data) || (data.conductorMoto is string && data.conductorMoto.size() <= 100))
+        && (!('conductorPlaca' in data) || (data.conductorPlaca is string && data.conductorPlaca.size() <= 20))
+        && (!('conductorPinSeguridad' in data) || (data.conductorPinSeguridad is string && data.conductorPinSeguridad.size() <= 10))
+        && (!('conductorTiempoEstimado' in data) || (data.conductorTiempoEstimado is string && data.conductorTiempoEstimado.size() <= 50))
+        && (!('conductorAfuera' in data) || data.conductorAfuera is bool)
+        && (!('driverLatOffset' in data) || data.driverLatOffset is number)
+        && (!('driverLonOffset' in data) || data.driverLonOffset is number)
+        && (!('passengerLat' in data) || data.passengerLat is number)
+        && (!('passengerLon' in data) || data.passengerLon is number)
+        && (!('calificacionPasajero' in data) || (data.calificacionPasajero is int && data.calificacionPasajero >= 1 && data.calificacionPasajero <= 5))
+        && (!('comentarioPasajero' in data) || (data.comentarioPasajero is string && data.comentarioPasajero.size() <= 200))
+        && (!('calificadoAt' in data) || data.calificadoAt is string)
         && (!('createdAt' in data) || data.createdAt is timestamp);
     }
 
@@ -80,21 +102,19 @@ service cloud.firestore {
 
       allow update: if isOwner(userId) 
         && isValidUser(incoming())
-        && incoming().nombre == existing().nombre // Immutable fields
-        && incoming().telefono == existing().telefono
         && (!('createdAt' in incoming()) || incoming().createdAt == existing().createdAt)
-        && incoming().diff(existing()).affectedKeys().hasOnly(['foto', 'createdAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly(['foto', 'createdAt', 'fcmToken', 'role', 'moto', 'placa', 'pinSeguridad', 'tiempoEstimado', 'calificacion', 'nombre', 'telefono']);
 
       allow delete: if false; // Profiles are immortal
     }
 
     // 2. Recorridos Path
     match /recorridos/{recorridoId} {
-      // Users can get their own ride requests
-      allow get: if isSignedIn() && existing().usuarioId == request.auth.uid;
+      // Users can get their own ride requests or drivers can fetch rides they accept
+      allow get: if isSignedIn() && (existing().usuarioId == request.auth.uid || existing().status == 'pending' || existing().conductorId == request.auth.uid || existing().conductorId == 'sim-driver-1');
       
-      // Users can list only their own requests. Prohibits scraping.
-      allow list: if isSignedIn() && resource.data.usuarioId == request.auth.uid;
+      // Users can list their own requests, and drivers can see pending rides or their accepted rides
+      allow list: if isSignedIn() && (resource.data.usuarioId == request.auth.uid || resource.data.status == 'pending' || resource.data.conductorId == request.auth.uid || resource.data.conductorId == 'sim-driver-1');
 
       allow create: if isSignedIn() 
         && isValidId(recorridoId)
@@ -104,18 +124,39 @@ service cloud.firestore {
         && (!('createdAt' in incoming()) || incoming().createdAt == request.time);
 
       allow update: if isSignedIn() 
-        && existing().usuarioId == request.auth.uid
         && isValidRecorrido(incoming())
         && incoming().usuarioId == existing().usuarioId // Immutable fields
         && (!('createdAt' in incoming()) || incoming().createdAt == existing().createdAt)
-        // Terminal state lockout: Cannot update once completed or cancelled
-        && existing().status != 'completed'
-        && existing().status != 'cancelled'
         && (
-          // Action 1: Cancel ride
-          (incoming().status == 'cancelled' && incoming().diff(existing()).affectedKeys().hasOnly(['status'])) ||
-          // Action 2: Change destination/notes
-          (incoming().diff(existing()).affectedKeys().hasOnly(['dePartida', 'coordenadasGoogleMaps', 'notas']))
+          // Standard transition rules for active rides
+          (
+            existing().status != 'completed'
+            && existing().status != 'cancelled'
+            && (
+              // Action 1: Passenger cancelling or editing notes
+              (existing().usuarioId == request.auth.uid && (
+                (incoming().status == 'cancelled' && incoming().diff(existing()).affectedKeys().hasOnly(['status'])) ||
+                (incoming().diff(existing()).affectedKeys().hasOnly(['dePartida', 'coordenadasGoogleMaps', 'notas'])) ||
+                (incoming().status == 'completed' && incoming().diff(existing()).affectedKeys().hasOnly(['status']))
+              )) ||
+              // Action 2: Driver accepting a pending ride
+              (existing().status == 'pending' && incoming().status == 'accepted' && (
+                incoming().diff(existing()).affectedKeys().hasAll(['status', 'conductorId', 'conductorNombre', 'conductorTelefono', 'conductorFoto', 'conductorMoto', 'conductorPlaca', 'conductorPinSeguridad', 'conductorTiempoEstimado'])
+              )) ||
+              // Action 3: Driver signaling arrival or updating status
+              ((existing().conductorId == request.auth.uid || existing().conductorId == 'sim-driver-1') && (
+                (incoming().conductorAfuera == true && incoming().diff(existing()).affectedKeys().hasOnly(['conductorAfuera'])) ||
+                (incoming().status == 'picked_up' && incoming().diff(existing()).affectedKeys().hasOnly(['status'])) ||
+                (incoming().status == 'completed' && incoming().diff(existing()).affectedKeys().hasOnly(['status']))
+              ))
+            )
+          ) ||
+          // Exemption: Passenger can rate their completed ride post-arrival
+          (
+            existing().status == 'completed'
+            && existing().usuarioId == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['calificacionPasajero', 'comentarioPasajero', 'calificadoAt'])
+          )
         );
 
       allow delete: if isSignedIn() && existing().usuarioId == request.auth.uid && existing().status == 'pending';
