@@ -1,0 +1,124 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net - Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- REUSABLE SECURITY PRIMITIVES ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- VALIDATION BLUEPRINTS ---
+
+    // Users Collection Helper
+    function isValidUser(data) {
+      return data.nombre is string 
+        && data.nombre.size() >= 1 
+        && data.nombre.size() <= 100
+        && data.telefono is string 
+        && data.telefono.size() >= 7 
+        && data.telefono.size() <= 20
+        && (!('foto' in data) || (data.foto is string && data.foto.size() <= 600000))
+        && (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    // Recorridos Collection Helper
+    function isValidRecorrido(data) {
+      return data.usuarioId is string 
+        && data.usuarioId.size() <= 128
+        && data.usuarioId == request.auth.uid
+        && data.nombre is string 
+        && data.nombre.size() >= 1 
+        && data.nombre.size() <= 100
+        && data.telefono is string 
+        && data.telefono.size() >= 7 
+        && data.telefono.size() <= 20
+        && data.dePartida is string 
+        && data.dePartida.size() >= 1 
+        && data.dePartida.size() <= 500
+        && (!('coordenadasGoogleMaps' in data) || (data.coordenadasGoogleMaps is string && data.coordenadasGoogleMaps.size() <= 250))
+        && (!('notas' in data) || (data.notas is string && data.notas.size() <= 500))
+        && data.status is string 
+        && (data.status == 'pending' || data.status == 'accepted' || data.status == 'completed' || data.status == 'cancelled')
+        && (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    // --- ENTITY PATH MATCHES ---
+
+    // 1. Users Path
+    match /users/{userId} {
+      allow get: if isSignedIn() && (isOwner(userId) || get(/databases/$(database)/documents/users/$(userId)).data.telefono != null);
+      
+      // Strict list rule - prevent bulk harvesting
+      allow list: if isSignedIn() && isOwner(userId);
+
+      allow create: if isOwner(userId) 
+        && isValidId(userId)
+        && isValidUser(incoming())
+        && incoming().keys().hasAll(['nombre', 'telefono'])
+        && (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+
+      allow update: if isOwner(userId) 
+        && isValidUser(incoming())
+        && incoming().nombre == existing().nombre // Immutable fields
+        && incoming().telefono == existing().telefono
+        && (!('createdAt' in incoming()) || incoming().createdAt == existing().createdAt)
+        && incoming().diff(existing()).affectedKeys().hasOnly(['foto', 'createdAt']);
+
+      allow delete: if false; // Profiles are immortal
+    }
+
+    // 2. Recorridos Path
+    match /recorridos/{recorridoId} {
+      // Users can get their own ride requests
+      allow get: if isSignedIn() && existing().usuarioId == request.auth.uid;
+      
+      // Users can list only their own requests. Prohibits scraping.
+      allow list: if isSignedIn() && resource.data.usuarioId == request.auth.uid;
+
+      allow create: if isSignedIn() 
+        && isValidId(recorridoId)
+        && isValidRecorrido(incoming())
+        && incoming().status == 'pending' // Initial status constraint
+        && incoming().keys().hasAll(['usuarioId', 'nombre', 'telefono', 'dePartida', 'status'])
+        && (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+
+      allow update: if isSignedIn() 
+        && existing().usuarioId == request.auth.uid
+        && isValidRecorrido(incoming())
+        && incoming().usuarioId == existing().usuarioId // Immutable fields
+        && (!('createdAt' in incoming()) || incoming().createdAt == existing().createdAt)
+        // Terminal state lockout: Cannot update once completed or cancelled
+        && existing().status != 'completed'
+        && existing().status != 'cancelled'
+        && (
+          // Action 1: Cancel ride
+          (incoming().status == 'cancelled' && incoming().diff(existing()).affectedKeys().hasOnly(['status'])) ||
+          // Action 2: Change destination/notes
+          (incoming().diff(existing()).affectedKeys().hasOnly(['dePartida', 'coordenadasGoogleMaps', 'notas']))
+        );
+
+      allow delete: if isSignedIn() && existing().usuarioId == request.auth.uid && existing().status == 'pending';
+    }
+  }
+}

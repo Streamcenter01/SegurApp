@@ -1,0 +1,300 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800;900&display=swap');
+@import "tailwindcss";
+
+:root {
+  --brand-primary: #ff1e27; /* Deportivo principal */
+  --brand-secondary: #e50914; /* Deportivo secundario */
+  --bg-dark: #121212;
+  --bg-input: #1a1a1a;
+  --text-secondary: #a0a0a0;
+  --bg-page: #000000;
+  --text-primary: #ffffff;
+  --ambient-bg-gradient: linear-gradient(180deg, rgba(0, 0, 0, 0.85) 0%, rgba(18, 18, 18, 0.98) 100%);
+}
+
+.light {
+  --brand-primary: #d32f2f; /* slightly darker red for high visibility contrast in day mode */
+  --brand-secondary: #b71c1c;
+  --bg-dark: #ffffff;
+  --bg-input: #f3f4f6; /* Tailwind gray-100 */
+  --text-secondary: #4b5563; /* Tailwind gray-600 */
+  --bg-page: #f9fafb; /* Tailwind gray-50 */
+  --text-primary: #111827; /* Tailwind gray-900 */
+  --ambient-bg-gradient: linear-gradient(180deg, rgba(249, 250, 251, 0.92) 0%, rgba(243, 244, 246, 0.98) 100%);
+}
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit", var(--font-sans);
+  
+  --color-brand-primary: var(--brand-primary);
+  --color-brand-secondary: var(--brand-secondary);
+  --color-bg-dark: var(--bg-dark);
+  --color-bg-input: var(--bg-input);
+  --color-text-secondary: var(--text-secondary);
+  --animate-spin-slow: spin 12s linear infinite;
+}
+
+body {
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Fondo de motocicleta Raider 125 estilizado con gradiente de alto contraste */
+.ambient-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--ambient-bg-gradient),
+              url('https://imgs.search.brave.com/4EBMHUrFzUMmziphOMTPiPrRGPM74GSSptcyBcla7gU/rs:fit:860:0:0:0/g:ce/aHR0cHM6Ly9kZWxj/YXIuY29tLnV5L3dw/LWNvbnRlbnQvdXBs/b2Fkcy8yMDIzLzEw/L1JBSURFUi03LXNj/YWxlZC5qcGc') no-repeat center center;
+  background-size: cover;
+  z-index: -1;
+  transform: translateZ(0);
+  transition: background 0.3s ease;
+}
+
+/* Animación de barrido metálico reflectivo */
+@keyframes metallicSweep {
+  0% { left: -150%; }
+  50% { left: -150%; }
+  100% { left: 150%; }
+}
+
+/* Animación de latido/motor */
+@keyframes engineIdle {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
+/* Pulso magnético de resplandor deportivo */
+@keyframes magneticPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 30, 39, 0.6), 
+                0 0 0 0 rgba(255, 30, 39, 0.3);
+  }
+  70% {
+    box-shadow: 0 0 0 12px rgba(255, 30, 39, 0), 
+                0 0 0 24px rgba(255, 30, 39, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 30, 39, 0), 
+                0 0 0 0 rgba(255, 30, 39, 0);
+  }
+}
+
+/* Clases de animación customizadas */
+.animate-metallic::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 150%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.03) 20%,
+    rgba(255, 255, 255, 0.15) 50%,
+    rgba(255, 255, 255, 0.03) 80%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  transform: skewX(-25deg);
+  animation: metallicSweep 6s infinite ease-in-out;
+  pointer-events: none;
+}
+
+.animate-metallic-fast::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 150%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.1) 20%,
+    rgba(255, 255, 255, 0.4) 50%,
+    rgba(255, 255, 255, 0.1) 80%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  transform: skewX(-20deg);
+  animation: metallicSweep 3.5s infinite ease-in-out;
+  pointer-events: none;
+}
+
+.animate-engine-idle {
+  animation: engineIdle 1.8s infinite ease-in-out;
+}
+
+.animate-magnetic-pulse {
+  animation: magneticPulse 2s infinite ease-in-out;
+}
+
+/* Light mode smart overrides for hardcoded layout utilities to ensure spectacular readability */
+.light .text-white {
+  color: #111827 !important; /* Converts hardcoded text-white to very dark gray */
+}
+
+.light .text-text-secondary {
+  color: #4b5563 !important; /* Converts gray-400 equivalent to gray-600 */
+}
+
+.light .bg-bg-dark {
+  background-color: #ffffff !important;
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .bg-bg-dark\/95 {
+  background-color: rgba(255, 255, 255, 0.96) !important;
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .bg-bg-dark\/90 {
+  background-color: rgba(255, 255, 255, 0.92) !important;
+}
+
+.light .bg-bg-dark\/80 {
+  background-color: rgba(255, 255, 255, 0.85) !important;
+}
+
+.light .bg-bg-input {
+  background-color: #f3f4f6 !important;
+  color: #111827 !important;
+}
+
+.light .border-white\/5,
+.light .border-white\/10,
+.light .border-white\/15,
+.light .border-white\/20 {
+  border-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light input {
+  color: #111827 !important;
+  background-color: #f3f4f6 !important;
+  border-color: rgba(0, 0, 0, 0.1) !important;
+}
+
+.light input:focus {
+  border-color: var(--brand-primary) !important;
+}
+
+.light input::placeholder {
+  color: #9ca3af !important;
+}
+
+.light select {
+  color: #111827 !important;
+  background-color: #f3f4f6 !important;
+  border-color: rgba(0, 0, 0, 0.1) !important;
+}
+
+.light .bg-white\/5 {
+  background-color: rgba(0, 0, 0, 0.05) !important;
+}
+
+.light .bg-white\/10 {
+  background-color: rgba(0, 0, 0, 0.08) !important;
+}
+
+.light .hover\:bg-white\/10:hover {
+  background-color: rgba(0, 0, 0, 0.12) !important;
+}
+
+.light .hover\:bg-white\/20:hover {
+  background-color: rgba(0, 0, 0, 0.18) !important;
+}
+
+.light .bg-black\/60 {
+  background-color: rgba(255, 255, 255, 0.9) !important;
+  border-color: var(--brand-primary) !important;
+}
+
+.light .bg-black\/60 .text-white {
+  color: var(--brand-primary) !important; /* Make icon inside the logo pop beautifully */
+}
+
+.light .bg-black\/85 {
+  background-color: rgba(0, 0, 0, 0.65) !important; /* Keeps overlay semi-transparent dark backdrop for overlays */
+}
+
+.light .bg-black\/40 {
+  background-color: rgba(0, 0, 0, 0.04) !important;
+}
+
+.light .bg-black\/20 {
+  background-color: rgba(0, 0, 0, 0.02) !important;
+}
+
+.light .text-neutral-400 {
+  color: #4b5563 !important;
+}
+
+.light .text-gray-400 {
+  color: #4b5563 !important;
+}
+
+.light .text-gray-300 {
+  color: #374151 !important;
+}
+
+.light .text-gray-200 {
+  color: #1f2937 !important;
+}
+
+.light .text-emerald-400 {
+  color: #059669 !important; /* Emerald-600 */
+}
+
+.light .bg-emerald-500\/10 {
+  background-color: rgba(16, 185, 129, 0.15) !important;
+}
+
+.light .bg-emerald-400\/10 {
+  background-color: rgba(16, 185, 129, 0.15) !important;
+}
+
+.light .bg-amber-400\/10 {
+  background-color: rgba(245, 158, 11, 0.15) !important;
+}
+
+.light .text-amber-400 {
+  color: #b45309 !important; /* Amber-700 */
+}
+
+.light .text-amber-300 {
+  color: #b45309 !important;
+}
+
+.light .bg-amber-500\/5 {
+  background-color: rgba(245, 158, 11, 0.08) !important;
+}
+
+.light .border-amber-500\/20 {
+  border-color: rgba(245, 158, 11, 0.3) !important;
+}
+
+.light .bg-emerald-500 {
+  background-color: #10b981 !important;
+  color: #ffffff !important;
+}
+
+.light .bg-emerald-500 .text-black {
+  color: #ffffff !important;
+}
+
+.light .shadow-2xl {
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* Let headers/buttons keep white text if specified with absolute priority styles like text-slate-100 or when styled with brand background */
+.light .bg-brand-primary .text-white,
+.light button[style*="linear-gradient"] {
+  color: #ffffff !important;
+}

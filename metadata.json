@@ -1,0 +1,6 @@
+{
+  "name": "SegurApp Recorridos",
+  "description": "Solicitud rápida y segura de recorridos en Neiva con geolocalización y contacto directo por WhatsApp.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

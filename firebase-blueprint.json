@@ -1,0 +1,94 @@
+{
+  "entities": {
+    "users": {
+      "title": "User",
+      "description": "User profile containing identity and contact details",
+      "type": "object",
+      "properties": {
+        "nombre": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Piloto or App user name/alias"
+        },
+        "telefono": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 20,
+          "pattern": "^[0-9+() -]+$",
+          "description": "WhatsApp contact number"
+        },
+        "foto": {
+          "type": "string",
+          "maxLength": 500000,
+          "description": "Base64 encoded avatar photo or URL"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        }
+      },
+      "required": ["nombre", "telefono"]
+    },
+    "recorridos": {
+      "title": "Recorrido",
+      "description": "A ride request submitted by a user",
+      "type": "object",
+      "properties": {
+        "usuarioId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the requester user"
+        },
+        "nombre": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "User name of the requester"
+        },
+        "telefono": {
+          "type": "string",
+          "maxLength": 20,
+          "description": "Contact phone of the requester"
+        },
+        "dePartida": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Manual or automatic origin starting location"
+        },
+        "coordenadasGoogleMaps": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Google Maps coordinates URL"
+        },
+        "notas": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional notes or luggage preferences"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "accepted", "completed", "cancelled"],
+          "description": "Status of the ride"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of request creation"
+        }
+      },
+      "required": ["usuarioId", "nombre", "telefono", "dePartida", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "users",
+      "description": "Collection of registered user profiles"
+    },
+    "/recorridos/{recorridoId}": {
+      "schema": "recorridos",
+      "description": "Collection of submitted ride requests"
+    }
+  }
+}
