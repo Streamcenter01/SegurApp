@@ -46,58 +46,8 @@ import {
   getDoc, 
   serverTimestamp 
 } from "firebase/firestore";
-
-interface UserProfile {
-  nombre: string;
-  telefono: string;
-  foto: string;
-  uid?: string;
-  role?: 'usuario' | 'conductor';
-  moto?: string;
-  placa?: string;
-  pinSeguridad?: string;
-  tiempoEstimado?: string;
-  calificacion?: string;
-}
-
-interface Recorrido {
-  id: string;
-  usuarioId: string;
-  nombre: string;
-  telefono: string;
-  dePartida: string;
-  coordenadasGoogleMaps: string;
-  notas: string;
-  status: 'pending' | 'accepted' | 'picked_up' | 'completed' | 'cancelled';
-  createdAt: string;
-  conductorId?: string;
-  conductorNombre?: string;
-  conductorTelefono?: string;
-  conductorFoto?: string;
-  conductorMoto?: string;
-  conductorPlaca?: string;
-  conductorPinSeguridad?: string;
-  conductorTiempoEstimado?: string;
-  driverLatOffset?: number;
-  driverLonOffset?: number;
-  passengerLat?: number;
-  passengerLon?: number;
-}
-
-interface ContactoConfianza {
-  nombre: string;
-  telefono: string;
-  foto: string;
-}
-
-interface ViajeProgramado {
-  id: string;
-  titulo: string;
-  fechaHora: string;
-  origen: string;
-  notas: string;
-  notificado: boolean;
-}
+import { UserProfile, Recorrido, ContactoConfianza, ViajeProgramado } from "./types";
+import RadarMap from "./components/RadarMap";
 
 const WHATSAPP_DESTINO = "573189882787";
 
@@ -1870,81 +1820,12 @@ export default function App() {
                     </div>
 
                     {/* RADAR MAP FOR CONDUCTOR */}
-                    <div className="bg-bg-dark border border-white/10 rounded-3xl p-5 relative overflow-hidden shadow-xl">
-                      <div className="flex justify-between items-center mb-3">
-                        <span className="text-[10px] font-bold tracking-widest text-brand-secondary uppercase flex items-center gap-1">
-                          <Compass className="w-3.5 h-3.5 text-brand-secondary animate-spin-slow" /> Radar de Solicitudes Activas
-                        </span>
-                        <span className="text-[9px] font-bold text-brand-secondary bg-brand-secondary/10 border border-brand-secondary/20 px-2 py-0.5 rounded-full uppercase">
-                          Neiva GPS
-                        </span>
-                      </div>
-                      
-                      <div className="relative w-full h-52 bg-black rounded-2xl overflow-hidden border border-white/5 shadow-inner">
-                        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,#111_0%,#000_100%)] opacity-80" />
-                        <div className="absolute inset-0" style={{
-                          backgroundImage: 'radial-gradient(circle, rgba(255,255,255,0.05) 1px, transparent 1px)',
-                          backgroundSize: '20px 20px'
-                        }} />
-
-                        {conductorOnline && (
-                          <div className="absolute inset-0 bg-[linear-gradient(180deg,transparent_45%,rgba(0,180,255,0.04)_50%,transparent_55%)] animate-pulse" />
-                        )}
-
-                        <svg className="absolute inset-0 w-full h-full opacity-30" viewBox="0 0 100 100" preserveAspectRatio="none">
-                          <path d="M 0,20 Q 50,50 100,25" fill="none" stroke="#22c55e" strokeWidth="0.8" strokeDasharray="3 3" />
-                          <path d="M 10,0 Q 40,60 90,100" fill="none" stroke="#fff" strokeWidth="0.5" strokeOpacity="0.4" />
-                          <path d="M 0,80 Q 70,70 100,90" fill="none" stroke="#fff" strokeWidth="0.5" strokeOpacity="0.4" />
-                        </svg>
-
-                        {/* Conductor Center Node */}
-                        <div className="absolute left-[50%] top-[50%] -translate-x-1/2 -translate-y-1/2 flex flex-col items-center">
-                          <div className="relative">
-                            <span className={`absolute -inset-2.5 rounded-full ${conductorOnline ? 'bg-brand-secondary/20 animate-ping' : 'bg-neutral-800'}`} />
-                            <div className="w-8 h-8 rounded-full bg-brand-secondary border-2 border-white flex items-center justify-center shadow-lg shadow-brand-secondary/40">
-                              <Bike className="w-4 h-4 text-white" />
-                            </div>
-                          </div>
-                          <span className="text-[8px] font-bold text-white bg-black/80 px-1.5 py-0.5 rounded-full border border-white/10 mt-1 uppercase">Tú (Piloto)</span>
-                        </div>
-
-                        {/* Pending targets */}
-                        {conductorOnline && recorridosActivos.filter(r => r.status === 'pending').map((ride, idx) => {
-                          const offsets = [
-                            { x: '25%', y: '25%' },
-                            { x: '75%', y: '30%' },
-                            { x: '30%', y: '70%' },
-                            { x: '70%', y: '75%' }
-                          ];
-                          const offset = offsets[idx % offsets.length];
-                          return (
-                            <button
-                              key={ride.id}
-                              type="button"
-                              onClick={() => {
-                                mostrarAlertaCustom(
-                                  `🚀 Solicitud de ${ride.nombre}.\n📍 Origen: ${ride.dePartida}\n📝 Nota: "${ride.notas || "Sin notas"}"\n\n¿Aceptar este viaje e iniciar navegación?`,
-                                  () => aceptarRecorrido(ride.id),
-                                  "DETALLES DE SOLICITUD"
-                                );
-                              }}
-                              className="absolute flex flex-col items-center group cursor-pointer active:scale-95 transition-transform"
-                              style={{ left: offset.x, top: offset.y }}
-                            >
-                              <div className="relative">
-                                <span className="absolute -inset-2.5 rounded-full bg-brand-primary/40 animate-ping" />
-                                <div className="w-7 h-7 rounded-full bg-brand-primary border-2 border-white flex items-center justify-center shadow-md">
-                                  <User className="w-3.5 h-3.5 text-white" />
-                                </div>
-                              </div>
-                              <span className="text-[7px] font-bold text-white bg-brand-primary px-1 rounded-md mt-0.5 shadow-md uppercase">
-                                {ride.nombre.split(" ")[0]}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
+                    <RadarMap
+                      recorridosActivos={recorridosActivos}
+                      conductorOnline={conductorOnline}
+                      aceptarRecorrido={aceptarRecorrido}
+                      mostrarAlertaCustom={mostrarAlertaCustom}
+                    />
 
                     {/* LIVE SERVICES LIST */}
                     <div className="bg-bg-dark border border-white/10 rounded-3xl p-5 shadow-xl">
